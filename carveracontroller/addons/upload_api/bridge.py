@@ -6,7 +6,6 @@ from __future__ import annotations
 import logging
 from typing import Callable
 
-from kivy.app import App
 from kivy.clock import Clock
 
 from carveracontroller.CNC import CNC
@@ -29,13 +28,9 @@ class MakeraBridge:
         controller = getattr(m, "controller", None)
         if controller is None or state == NOT_CONNECTED or not getattr(controller, "stream", None):
             return False, "not connected to a machine"
-        app = App.get_running_app()
-        if app is not None and getattr(app, "playing", False):
-            return False, "a job is running"
-        if getattr(m, "uploading", False) or getattr(m, "downloading", False) or getattr(controller, "sendNUM", 0):
-            return False, "another file transfer is in progress"
-        if getattr(m, "_batch_kind", None):
-            return False, "a batch transfer is in progress"
+        blocked = m.transfer_block_reason()
+        if blocked:
+            return False, blocked
         if state != "Idle":
             return False, f"machine is {state}"
         return True, ""
@@ -43,7 +38,7 @@ class MakeraBridge:
     def machine_name(self) -> str:
         return str(getattr(self.makera, "past_machine_addr", "") or "")
 
-    def upload(self, local_path: str, remote_dir: str, done: Callable[[str, str], None]) -> None:
+    def upload(self, local_path: str, remote_dir: str, done: Callable[..., None]) -> None:
         # Kivy UI state (progress popup, file list) must be touched on the main thread. Check
         # readiness again there: the operator may have started something since the worker looked.
         def start(_dt):
@@ -52,12 +47,9 @@ class MakeraBridge:
                 done(UploadOutcome.BUSY, reason)
                 return
 
-            def finished(result, remotename):
+            def finished(result, remote_path):
                 if result:
-                    remote = str(remotename or "")
-                    # A compressed upload ends up decompressed on the machine without ".lz".
-                    remote = remote[:-3] if remote.endswith(".lz") else remote
-                    done(UploadOutcome.OK, f"uploaded to {remote}", remote_path=remote or None)
+                    done(UploadOutcome.OK, f"uploaded to {remote_path}", remote_path=remote_path)
                 elif result is None:
                     done(UploadOutcome.FAILED, "upload cancelled in the Controller")
                 else:
@@ -69,7 +61,6 @@ class MakeraBridge:
                     firmware=False,
                     remote_dir=remote_dir,
                     on_finished=finished,
-                    remember_local_dir=False,
                 )
             except Exception as exc:
                 logger.exception("Upload API upload failed to start")

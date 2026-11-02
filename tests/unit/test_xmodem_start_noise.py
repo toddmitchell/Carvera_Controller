@@ -3,7 +3,7 @@ must not abort the transfer, and must not change what is sent."""
 
 from io import BytesIO
 
-from carveracontroller.XMODEM import ACK, CRC, EOT, XMODEM
+from carveracontroller.XMODEM import ACK, CAN, CRC, EOT, NAK, XMODEM
 
 
 def _send(incoming: bytes, content: bytes):
@@ -50,7 +50,6 @@ def _blocks(writes):
 def test_cancel_mid_transfer_stops_without_resending():
     content = b"G1 Z-1 F100\n" * 2000  # 3 data blocks
     # MD5 ACK, block 1 ACK, then the receiver cancels.
-    from carveracontroller.XMODEM import CAN
 
     result, writes = _send(CRC + ACK + ACK + CAN + CAN, content)
     assert result is False
@@ -65,7 +64,6 @@ def test_console_text_mid_transfer_stops_without_resending():
 
 
 def test_nak_still_resends_and_late_start_bytes_are_ignored():
-    from carveracontroller.XMODEM import NAK
 
     content = b"G21\n"
     # Extra 'C's after block 0 (ignored), then NAK for block 1 (resend), then ACKs.

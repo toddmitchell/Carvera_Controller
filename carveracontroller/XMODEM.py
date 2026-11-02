@@ -907,7 +907,7 @@ class XMODEM:
         noise_bytes = 0
         while True:
             char = self.getc(1)
-            if char and _is_console_text(char) and noise_bytes < MAX_START_NOISE_BYTES:
+            if _is_console_text(char) and noise_bytes < MAX_START_NOISE_BYTES:
                 # Console text still on the wire (a status reply, a message from an earlier
                 # transfer) is not part of the handshake. Nothing has been sent yet, so skip it
                 # instead of counting it as an error and aborting.

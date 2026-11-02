@@ -6,6 +6,7 @@ from __future__ import annotations
 import hashlib
 import http.client
 import json
+import os
 import threading
 import time
 
@@ -47,13 +48,26 @@ class FakeBridge:
 
 
 @pytest.fixture
-def api():
-    bridge = FakeBridge()
-    server = UploadApi(bridge)
-    server.start("127.0.0.1", 0)
-    server.queue.poll_interval = 0.02
-    yield server, bridge
-    server.stop()
+def make_api():
+    """Start Upload APIs on a free local port (stopped at teardown); returns (api, bridge)."""
+    started = []
+
+    def make(on_change=None, **start_kwargs):
+        bridge = FakeBridge()
+        server = UploadApi(bridge, on_change=on_change(lambda: server) if on_change else None)
+        started.append(server)
+        server.start("127.0.0.1", 0, **start_kwargs)
+        server.queue.poll_interval = 0.02
+        return server, bridge
+
+    yield make
+    for server in started:
+        server.stop()
+
+
+@pytest.fixture
+def api(make_api):
+    return make_api()
 
 
 def request(server, method, path, body=None, headers=None):
@@ -80,6 +94,14 @@ def wait_for(predicate, timeout=3.0):
             return True
         time.sleep(0.01)
     return False
+
+
+def job_state(server, job):
+    return request(server, "GET", f"/v1/uploads/{job['id']}")[1]["state"]
+
+
+def wait_for_state(server, job, state):
+    return wait_for(lambda: job_state(server, job) == state)
 
 
 def test_names():
@@ -110,7 +132,7 @@ def test_upload_is_queued_and_sent(api):
     assert status == 202
     assert job["state"] == "queued" and job["path"] == f"{REMOTE_DIR}/coin.nc"
     assert headers["Location"] == f"/v1/uploads/{job['id']}"
-    assert wait_for(lambda: request(server, "GET", f"/v1/uploads/{job['id']}")[1]["state"] == "done")
+    assert wait_for_state(server, job, "done")
     (path, remote_dir, sent) = bridge.uploads[0]
     assert sent == content and remote_dir == REMOTE_DIR and path.endswith("/coin.nc")
     assert "uploaded coin.nc" in bridge.notices[0]
@@ -124,7 +146,7 @@ def test_waits_until_the_machine_is_ready(api):
     assert bridge.uploads == []
     assert request(server, "GET", "/v1/status")[1]["waiting"] == "machine is Run"
     bridge.ready = True
-    assert wait_for(lambda: request(server, "GET", f"/v1/uploads/{job['id']}")[1]["state"] == "done")
+    assert wait_for_state(server, job, "done")
 
 
 def test_busy_at_the_last_moment_requeues(api):
@@ -133,16 +155,16 @@ def test_busy_at_the_last_moment_requeues(api):
     _, job, _ = post_file(server, "again.nc", b"G21\n")
     assert bridge.started.wait(2)
     time.sleep(0.1)
-    assert request(server, "GET", f"/v1/uploads/{job['id']}")[1]["state"] == "queued"
+    assert job_state(server, job) == "queued"
     bridge.outcome = UploadOutcome.OK
-    assert wait_for(lambda: request(server, "GET", f"/v1/uploads/{job['id']}")[1]["state"] == "done")
+    assert wait_for_state(server, job, "done")
 
 
 def test_failed_upload_is_reported(api):
     server, bridge = api
     bridge.outcome = UploadOutcome.FAILED
     _, job, _ = post_file(server, "bad.nc", b"G21\n")
-    assert wait_for(lambda: request(server, "GET", f"/v1/uploads/{job['id']}")[1]["state"] == "failed")
+    assert wait_for_state(server, job, "failed")
     assert "failed" in bridge.notices[0]
 
 
@@ -178,17 +200,12 @@ def test_cancel_queued(api):
     assert request(server, "DELETE", f"/v1/uploads/{job['id']}")[0] == 409
 
 
-def test_token():
-    bridge = FakeBridge()
-    server = UploadApi(bridge)
-    server.start("127.0.0.1", 0, token="s3cret")
-    try:
-        assert request(server, "GET", "/v1/status")[0] == 401
-        assert request(server, "GET", "/v1/status", headers={"Authorization": "Bearer nope"})[0] == 401
-        assert request(server, "GET", "/v1/status", headers={"Authorization": "Bearer s3cret"})[0] == 200
-        assert post_file(server, "t.nc", b"G21\n")[0] == 401
-    finally:
-        server.stop()
+def test_token(make_api):
+    server, _ = make_api(token="s3cret")
+    assert request(server, "GET", "/v1/status")[0] == 401
+    assert request(server, "GET", "/v1/status", headers={"Authorization": "Bearer nope"})[0] == 401
+    assert request(server, "GET", "/v1/status", headers={"Authorization": "Bearer s3cret"})[0] == 200
+    assert post_file(server, "t.nc", b"G21\n")[0] == 401
 
 
 def test_lan_requires_a_token():
@@ -198,50 +215,46 @@ def test_lan_requires_a_token():
     assert not server.running
 
 
-def test_browser_origins():
-    bridge = FakeBridge()
-    server = UploadApi(bridge)
-    server.start("127.0.0.1", 0, allowed_origins=["https://app.example.com"])
-    try:
-        # A page from another origin can't use it, even for a "simple" request.
-        status, _, _ = post_file(server, "o.nc", b"G21\n", headers={"Origin": "https://evil.example"})
-        assert status == 403
-        assert request(server, "OPTIONS", "/v1/uploads", headers={"Origin": "https://evil.example"})[0] == 403
-        # The allowed origin gets CORS headers.
-        status, _, headers = request(
-            server,
-            "OPTIONS",
-            "/v1/uploads",
-            headers={"Origin": "https://app.example.com", "Access-Control-Request-Method": "POST"},
-        )
-        assert status == 204 and headers["Access-Control-Allow-Origin"] == "https://app.example.com"
-        status, _, headers = request(server, "GET", "/v1/status", headers={"Origin": "https://app.example.com"})
-        assert status == 200 and headers["Access-Control-Allow-Origin"] == "https://app.example.com"
-        # Non-browser clients send no Origin and are allowed.
-        assert request(server, "GET", "/v1/status")[0] == 200
-    finally:
-        server.stop()
+def test_browser_origins(make_api):
+    server, _ = make_api(allowed_origins=["https://app.example.com"])
+    # A page from another origin can't use it, even for a "simple" request.
+    status, _, _ = post_file(server, "o.nc", b"G21\n", headers={"Origin": "https://evil.example"})
+    assert status == 403
+    assert request(server, "OPTIONS", "/v1/uploads", headers={"Origin": "https://evil.example"})[0] == 403
+    # The allowed origin gets CORS headers.
+    status, _, headers = request(
+        server,
+        "OPTIONS",
+        "/v1/uploads",
+        headers={"Origin": "https://app.example.com", "Access-Control-Request-Method": "POST"},
+    )
+    assert status == 204 and headers["Access-Control-Allow-Origin"] == "https://app.example.com"
+    status, _, headers = request(server, "GET", "/v1/status", headers={"Origin": "https://app.example.com"})
+    assert status == 200 and headers["Access-Control-Allow-Origin"] == "https://app.example.com"
+    # Non-browser clients send no Origin and are allowed.
+    assert request(server, "GET", "/v1/status")[0] == 200
 
 
 def test_queue_runs_jobs_in_order(tmp_path):
     bridge = FakeBridge()
     q = UploadQueue(bridge, spool_dir=str(tmp_path))
     for name in ("a.nc", "b.nc"):
-        p = tmp_path / name
+        p = tmp_path / name[0] / name  # one directory per job, as the POST handler spools them
+        p.parent.mkdir()
         p.write_bytes(name.encode())
         q.add(name=name, local_path=str(p), size=4, md5="x" * 32, client="test")
     q.run_once()
     q.run_once()
     assert [u[2] for u in bridge.uploads] == [b"a.nc", b"b.nc"]
-    assert not (tmp_path / "a.nc").exists()  # spooled file removed after upload
+    assert list(tmp_path.iterdir()) == []  # spooled files and their job directories removed
 
 
-def test_discard_pending_input_drops_a_stale_status_reply():
+def test_flush_rx_drops_a_stale_status_reply_over_wifi():
     from types import SimpleNamespace
 
     from carveracontroller.Controller import Controller
 
-    class FakeStream:
+    class FakeWifiStream:  # no input buffer to reset, like WIFIStream
         def __init__(self, chunks):
             self.chunks = list(chunks)
 
@@ -251,11 +264,10 @@ def test_discard_pending_input_drops_a_stale_status_reply():
         def recv(self):
             return self.chunks.pop(0)
 
-    stream = FakeStream([b"<Idle|MPos:0,0,0>\n", b"ok\r\n"])
-    dropped = Controller.discardPendingInput(SimpleNamespace(stream=stream))
-    assert dropped == len(b"<Idle|MPos:0,0,0>\n") + len(b"ok\r\n")
-    assert stream.chunks == []
-    assert Controller.discardPendingInput(SimpleNamespace(stream=None)) == 0
+    stream = FakeWifiStream([b"<Idle|MPos:0,0,0>\n", b"ok\r\n"])
+    resets = []
+    Controller._flush_rx(SimpleNamespace(stream=stream, comms=SimpleNamespace(reset_parser=lambda: resets.append(1))))
+    assert stream.chunks == [] and resets == [1]
 
 
 def test_top_bar_summary():
@@ -282,25 +294,25 @@ def test_top_bar_summary():
     assert (waiting["main"], waiting["minor"]) == ("2 queued", "machine is Run")
     done = {**base, "last": {"name": "a.nc", "state": "done", "finished_at": 95, "message": ""}}
     assert summarize(done, 100)["main"] == "Sent"
+    assert summarize(done, 100)["refresh_in"] == 5  # when "Sent" fades back
+    assert idle["refresh_in"] is None
     assert summarize(done, 200)["main"] == "Upload API"  # fades back
     failed = {**base, "last": {"name": "a.nc", "state": "failed", "finished_at": 95, "message": "x"}}
     assert summarize(failed, 110)["main"] == "Failed"
 
 
-def test_changes_are_reported_and_done_jobs_know_their_machine_path():
+def test_changes_are_reported_and_done_jobs_know_their_machine_path(make_api):
     changes = []
-    bridge = FakeBridge()
-    server = UploadApi(bridge, on_change=lambda: changes.append(server.snapshot()))
-    server.start("127.0.0.1", 0)
-    server.queue.poll_interval = 0.02
-    try:
-        assert changes and changes[-1]["running"] is True
-        _, job, _ = post_file(server, "seen.nc", b"G21\n")
-        assert wait_for(lambda: request(server, "GET", f"/v1/uploads/{job['id']}")[1]["state"] == "done")
-        assert any(c.get("receiving") == ["seen.nc"] for c in changes)  # while the body arrived
-        assert any(c.get("uploading") == "seen.nc" for c in changes)
-        assert server.snapshot()["last"]["state"] == "done"
-        assert request(server, "GET", f"/v1/uploads/{job['id']}")[1]["remote_path"] == f"{REMOTE_DIR}/seen.nc"
-    finally:
-        server.stop()
+    server, _ = make_api(on_change=lambda get: lambda: changes.append(get().snapshot()))
+    assert changes and changes[-1]["running"] is True
+    _, job, _ = post_file(server, "seen.nc", b"G21\n")
+    assert wait_for_state(server, job, "done")
+    assert any(c.get("receiving") == ["seen.nc"] for c in changes)  # while the body arrived
+    assert any(c.get("uploading") == "seen.nc" for c in changes)
+    assert server.snapshot()["last"]["state"] == "done"
+    assert request(server, "GET", f"/v1/uploads/{job['id']}")[1]["remote_path"] == f"{REMOTE_DIR}/seen.nc"
+    spool = server.queue.spool_dir
+    assert os.listdir(spool) == []  # the job's file and directory are gone
+    server.stop()
     assert changes[-1] == {"running": False}
+    assert not os.path.exists(spool)

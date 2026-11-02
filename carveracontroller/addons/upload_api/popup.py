@@ -6,7 +6,6 @@ from __future__ import annotations
 import time
 from typing import Callable
 
-from kivy.app import App
 from kivy.metrics import dp
 from kivy.uix.boxlayout import BoxLayout
 from kivy.uix.button import Button
@@ -15,6 +14,7 @@ from kivy.uix.popup import Popup
 from kivy.uix.scrollview import ScrollView
 
 from carveracontroller.translation import tr
+from carveracontroller.ui.theme import get_theme
 
 STATE_TEXT = {
     "queued": tr._("waiting"),
@@ -33,8 +33,7 @@ class UploadApiPopup(Popup):
         self.auto_dismiss = True
         self._on_load = on_load
 
-        theme = getattr(App.get_running_app(), "theme", None)
-        muted = tuple(getattr(theme, "text_muted", (0.7, 0.7, 0.7, 1)))
+        muted = tuple(get_theme().text_muted)
 
         root = BoxLayout(orientation="vertical", spacing=dp(8), padding=dp(10))
         host, port = address
@@ -48,7 +47,6 @@ class UploadApiPopup(Popup):
                 color=muted,
                 halign="left",
                 valign="middle",
-                text_size=(None, None),
             )
         )
 

@@ -3208,8 +3208,6 @@ class Makera(RelativeLayout):
 
         self.upload_api = UploadApi(MakeraBridge(self), on_change=self._upload_api_changed)
         self.configure_upload_api()
-        # Refresh the top-bar indicator once a second too, so "Sent"/"Failed" fade back.
-        Clock.schedule_interval(self.refresh_upload_api_view, 1)
 
         self._suppress_reconnect_popup = False
         self.tutorial = Tutorial(self)
@@ -4147,6 +4145,12 @@ class Makera(RelativeLayout):
         self.recent_local_dir_list = Utils.load_recent_local_directories()
 
     def update_recent_local_dir_list(self, new_dir):
+        # Temporary folders (the app's cache, Upload API spool, generated files) aren't worth listing.
+        real = os.path.realpath(new_dir)
+        for temp in (tempfile.gettempdir(), self.temp_dir):
+            temp = os.path.realpath(temp)
+            if real == temp or real.startswith(temp + os.sep):
+                return
         self.recent_local_dir_list = Utils.update_recent_local_directory_list(
             self.recent_local_dir_list,
             new_dir,
@@ -5151,8 +5155,7 @@ class Makera(RelativeLayout):
         if not remote_path or not is_job_file(os.path.basename(remote_path)):
             return
         remote_size = self.file_popup.selected_machine_filesize
-        remote_post_path = remote_path.replace("/sd/", "").replace("\\sd\\", "")
-        local_path = os.path.join(self.temp_dir, remote_post_path)
+        local_path = self._local_cache_path(remote_path)
         app = App.get_running_app()
         app.selected_local_filename = local_path
         app.selected_remote_filename = remote_path
@@ -6813,42 +6816,56 @@ class Makera(RelativeLayout):
         if path:
             self._remove_path_quietly(path)
 
-    def uploadLocalFile(
-        self, filepath, callback=None, firmware=None, remote_dir=None, on_finished=None, remember_local_dir=True
-    ):
+    def _local_cache_path(self, remote_path):
+        """Where the local copy of a machine file is kept (as downloads and uploads leave it)."""
+        return os.path.join(self.temp_dir, remote_path.replace("/sd/", "").replace("\\sd\\", ""))
+
+    def transfer_block_reason(self):
+        """Why a new file transfer can't start now, or None when it can."""
+        app = App.get_running_app()
+        if app is not None and app.playing:
+            return "a job is running"
+        if self.uploading or self.downloading or self.controller.sendNUM or self.controller.loadNUM:
+            return "another file transfer is in progress"
+        if self.decompstatus:
+            return "the machine is decompressing a file"
+        if getattr(self, "_batch_kind", None):
+            return "a batch transfer is in progress"
+        return None
+
+    def uploadLocalFile(self, filepath, callback=None, firmware=None, remote_dir=None, on_finished=None):
         """Upload ``filepath`` to the machine.
 
         ``remote_dir`` overrides the folder open in the file browser. ``on_finished(result,
-        remotename)`` is always called once at the end (``result`` True, False, or None when
-        cancelled), unlike ``callback`` which only runs on success. ``remember_local_dir=False``
-        keeps the file's folder out of the recent-folders list (used by the Upload API).
+        remote_path)`` is always called once at the end, from the upload thread (``result`` True,
+        False, or None when cancelled; ``remote_path`` the file's final name on the machine), unlike
+        ``callback`` which only runs on success.
         """
         if firmware is None:
             firmware = bool(self.file_popup.firmware_mode)
         self._uploading_firmware = bool(firmware)
-        self._upload_remote_dir = remote_dir
-        self._upload_remember_local_dir = remember_local_dir
         self.controller.sendNUM = SEND_FILE
         self.uploading_file = filepath
         self.original_upload_filepath = filepath  # Store original path for recent directory tracking
-        if "lz" in self.filetype and not self._uploading_firmware:  # Compress file if supported
-            qlzfilename = self.compress_file(filepath)
-            if qlzfilename:
-                self.uploading_file = qlzfilename
 
         def run():
-            self._last_upload_result = False
-            self._last_upload_remotename = None
+            result = (False, None)
             try:
-                self.doUpload(callback)
+                # Compress here, not on the UI thread: it reads and checksums the whole file.
+                if "lz" in self.filetype and not self._uploading_firmware:  # Compress file if supported
+                    qlzfilename = self.compress_file(filepath)
+                    if qlzfilename:
+                        self.uploading_file = qlzfilename
+                result = self.doUpload(callback, remote_dir)
             finally:
                 if on_finished:
-                    on_finished(self._last_upload_result, self._last_upload_remotename)
+                    on_finished(*result)
 
         threading.Thread(target=run).start()
 
     # -----------------------------------------------------------------------
-    def doUpload(self, callback):
+    def doUpload(self, callback, remote_dir=None):
+        """Upload ``self.uploading_file``; returns ``(result, remote_path)`` (see uploadLocalFile)."""
         firmware = bool(self._uploading_firmware)
         upload_result = None
         local_path = self.uploading_file
@@ -6866,10 +6883,11 @@ class Makera(RelativeLayout):
             self._cleanup_firmware_temp(success=False)
             self._uploading_firmware = False
             self._fail_batch_transfer()
-            return
-        machine_dir = getattr(self, "_upload_remote_dir", None) or self.file_popup.machine_dir
-        remotename = os.path.join(machine_dir, os.path.basename(os.path.normpath(self.uploading_file)))
-        self._last_upload_remotename = remotename
+            return False, None
+        upload_path = os.path.join(
+            remote_dir or self.file_popup.machine_dir, os.path.basename(os.path.normpath(self.uploading_file))
+        )
+        remotename = upload_path
         if firmware:
             remotename = self._firmware_plan(self.uploading_file).remote_path
         displayname = self.uploading_file
@@ -6883,7 +6901,7 @@ class Makera(RelativeLayout):
         self.uploading = True
         self.controller.pauseStream(1)
         # A status reply already on the wire would be read as handshake bytes and fail the upload.
-        self.controller.discardPendingInput()
+        self.controller._flush_rx()
         upload_result = None
         last_file_error = None
         try:
@@ -6933,9 +6951,7 @@ class Makera(RelativeLayout):
             )
         else:
             # copy file to application directory if needed
-            remote_path = os.path.join(machine_dir, os.path.basename(os.path.normpath(self.uploading_file)))
-            remote_post_path = remote_path.replace("/sd/", "").replace("\\sd\\", "")
-            local_path = os.path.join(self.temp_dir, remote_post_path)
+            local_path = self._local_cache_path(upload_path)
             if self.uploading_file != local_path and not firmware:
                 if self.uploading_file.endswith(".lz"):
                     # copy lz file to .lz dir
@@ -6964,8 +6980,7 @@ class Makera(RelativeLayout):
                 Clock.schedule_once(self.confirm_reset, 0)
             # update recent folder
             if not firmware:
-                if getattr(self, "_upload_remember_local_dir", True):
-                    self.update_recent_local_dir_list(os.path.dirname(self.original_upload_filepath))
+                self.update_recent_local_dir_list(os.path.dirname(self.original_upload_filepath))
                 remote_thumb = remotename[:-3] if str(remotename).endswith(".lz") else remotename
                 self.queue_machine_thumbnail(remote_thumb, self.original_upload_filepath)
 
@@ -6981,9 +6996,6 @@ class Makera(RelativeLayout):
                 self.decomptime = time.time()
 
         self.controller.sendNUM = 0
-        self._last_upload_result = upload_result
-        self._upload_remote_dir = None
-        self._upload_remember_local_dir = True
         if upload_result and callback:  # Only run callback if upload succeeded
             if self.uploading_file.endswith(".lz"):
                 # Schedule callback to run after decompression completes
@@ -7004,6 +7016,8 @@ class Makera(RelativeLayout):
         if getattr(self, "_batch_kind", None) == "upload" and not upload_result:
             # A failure or cancel leaves the operator to notice it, so do not start the rest.
             self._fail_batch_transfer()
+        # A compressed upload ends up decompressed on the machine, without ".lz".
+        return upload_result, upload_path[:-3] if upload_path.endswith(".lz") else upload_path
 
     # -----------------------------------------------------------------------
     def confirm_reset(self, *args):
@@ -9228,6 +9242,8 @@ class Makera(RelativeLayout):
         if app is None or api is None:
             return
         view = summarize_upload_api(api.snapshot(), time.time())
+        if view["refresh_in"]:  # "Sent"/"Failed" fades back
+            Clock.schedule_once(self.refresh_upload_api_view, view["refresh_in"])
         app.upload_api_visible = view["visible"]
         app.upload_api_main = view["main"]
         app.upload_api_minor = view["minor"]
@@ -9237,9 +9253,9 @@ class Makera(RelativeLayout):
     def show_upload_api_details(self):
         """List the recent API uploads; clicking a finished one loads it (never runs it)."""
         api = getattr(self, "upload_api", None)
-        if api is None or not api.running or api.queue is None:
+        if api is None or not api.running:
             return
-        UploadApiPopup(api.address or ("", 0), api.queue.recent()[:30], self.load_uploaded_file).open()
+        UploadApiPopup(api.address, api.queue.recent()[:30], self.load_uploaded_file).open()
 
     def load_uploaded_file(self, remote_path):
         """Load a file the Upload API put on the machine, as picking it in the file browser does:
@@ -9248,8 +9264,7 @@ class Makera(RelativeLayout):
         if app.playing:
             self.show_message_popup(tr._("A job is running. Load the file after it finishes."), False)
             return
-        remote_post_path = remote_path.replace("/sd/", "").replace("\\sd\\", "")
-        local_cached = os.path.join(self.temp_dir, remote_post_path)
+        local_cached = self._local_cache_path(remote_path)
         if not os.path.exists(local_cached):
             self.show_message_popup(
                 tr._("The local copy is gone. Open the file from the machine's file browser:") + "\n" + remote_path,
@@ -9263,24 +9278,20 @@ class Makera(RelativeLayout):
         api = getattr(self, "upload_api", None)
         if api is None:
             return
-        if not Config.getboolean("carvera", "upload_api_enabled", fallback=False):
+        # load_upload_api_config has set every key's default.
+        if not Config.getboolean("carvera", "upload_api_enabled"):
             api.stop()
             return
-        lan = Config.getboolean("carvera", "upload_api_lan", fallback=False)
-        token = (Config.get("carvera", "upload_api_token", fallback="") or "").strip()
-        origins = (Config.get("carvera", "upload_api_origins", fallback="") or "").replace(",", " ").split()
+        lan = Config.getboolean("carvera", "upload_api_lan")
+        token = Config.get("carvera", "upload_api_token").strip()
+        origins = Config.get("carvera", "upload_api_origins").replace(",", " ").split()
         try:
-            port = int(float(Config.get("carvera", "upload_api_port", fallback=str(UPLOAD_API_DEFAULT_PORT))))
+            port = int(float(Config.get("carvera", "upload_api_port")))
         except ValueError:
             port = UPLOAD_API_DEFAULT_PORT
         try:
             api.start("0.0.0.0" if lan else "127.0.0.1", port, token=token, allowed_origins=origins)
-            self.controller.log.put(
-                (
-                    Controller.MSG_NORMAL,
-                    "Upload API listening on %s:%d" % ("all interfaces" if lan else "127.0.0.1", port),
-                )
-            )
+            api.bridge.notify("Upload API listening on %s:%d" % api.address)
         except Exception as exc:
             logger.exception("Upload API failed to start")
             self.controller.log.put((Controller.MSG_ERROR, "Upload API not started: %s" % exc))
