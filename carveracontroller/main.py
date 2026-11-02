@@ -183,7 +183,9 @@ from carveracontroller.addons.stock.stock_estimate import auto_stock_for_loaded_
 from carveracontroller.addons.stock.ui.StockSettingsPopup import StockSettingsPopup
 from carveracontroller.addons.upload_api.api import DEFAULT_PORT as UPLOAD_API_DEFAULT_PORT
 from carveracontroller.addons.upload_api.api import UploadApi
+from carveracontroller.addons.upload_api.api import summarize as summarize_upload_api
 from carveracontroller.addons.upload_api.bridge import MakeraBridge
+from carveracontroller.addons.upload_api.popup import UploadApiPopup
 from carveracontroller.documentation import resolve_documentation_url
 from carveracontroller.serial_listeners import dispatch_serial_line
 from carveracontroller.timelapse import format_timelapse_status, timelapse_is_recording
@@ -3204,8 +3206,10 @@ class Makera(RelativeLayout):
         if Config.getboolean("carvera", "auto_reconnect_enabled", fallback=True):
             Clock.schedule_once(lambda dt: self.reconnect_last_connection(quiet=True, for_app_launch=True))
 
-        self.upload_api = UploadApi(MakeraBridge(self))
+        self.upload_api = UploadApi(MakeraBridge(self), on_change=self._upload_api_changed)
         self.configure_upload_api()
+        # Refresh the top-bar indicator once a second too, so "Sent"/"Failed" fade back.
+        Clock.schedule_interval(self.refresh_upload_api_view, 1)
 
         self._suppress_reconnect_popup = False
         self.tutorial = Tutorial(self)
@@ -9213,6 +9217,47 @@ class Makera(RelativeLayout):
         if self.controller_setting_change_list:
             self.apply_controller_setting_changes()
 
+    def _upload_api_changed(self):
+        # Called from the API's worker and HTTP threads; the UI is updated on the main thread.
+        Clock.schedule_once(self.refresh_upload_api_view, 0)
+
+    def refresh_upload_api_view(self, *args):
+        """Update the Upload API item in the top bar from the API's current state."""
+        app = App.get_running_app()
+        api = getattr(self, "upload_api", None)
+        if app is None or api is None:
+            return
+        view = summarize_upload_api(api.snapshot(), time.time())
+        app.upload_api_visible = view["visible"]
+        app.upload_api_main = view["main"]
+        app.upload_api_minor = view["minor"]
+        app.upload_api_active = view["active"]
+        app.upload_api_tooltip = view["tooltip"]
+
+    def show_upload_api_details(self):
+        """List the recent API uploads; clicking a finished one loads it (never runs it)."""
+        api = getattr(self, "upload_api", None)
+        if api is None or not api.running or api.queue is None:
+            return
+        UploadApiPopup(api.address or ("", 0), api.queue.recent()[:30], self.load_uploaded_file).open()
+
+    def load_uploaded_file(self, remote_path):
+        """Load a file the Upload API put on the machine, as picking it in the file browser does:
+        preview and select it. The operator still starts the job."""
+        app = App.get_running_app()
+        if app.playing:
+            self.show_message_popup(tr._("A job is running. Load the file after it finishes."), False)
+            return
+        remote_post_path = remote_path.replace("/sd/", "").replace("\\sd\\", "")
+        local_cached = os.path.join(self.temp_dir, remote_post_path)
+        if not os.path.exists(local_cached):
+            self.show_message_popup(
+                tr._("The local copy is gone. Open the file from the machine's file browser:") + "\n" + remote_path,
+                False,
+            )
+            return
+        self.select_file(remote_path, local_cached)
+
     def configure_upload_api(self):
         """Start, restart or stop the Upload API from the settings (see addons/upload_api)."""
         api = getattr(self, "upload_api", None)
@@ -10529,6 +10574,12 @@ class MakeraApp(App):
     # [left, top, right, bottom] in pixels — populated on iOS from
     # UIWindow.safeAreaInsets (see _update_safe_area_padding).
     safe_area_padding = ListProperty([0, 0, 0, 0])
+    # Upload API indicator in the top bar (see Makera.refresh_upload_api_view).
+    upload_api_visible = BooleanProperty(False)
+    upload_api_main = StringProperty("")
+    upload_api_minor = StringProperty("")
+    upload_api_active = BooleanProperty(False)
+    upload_api_tooltip = StringProperty("")
 
     def __init__(self, **kwargs):
         super().__init__(**kwargs)

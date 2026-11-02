@@ -54,7 +54,10 @@ class MakeraBridge:
 
             def finished(result, remotename):
                 if result:
-                    done(UploadOutcome.OK, f"uploaded to {remotename}")
+                    remote = str(remotename or "")
+                    # A compressed upload ends up decompressed on the machine without ".lz".
+                    remote = remote[:-3] if remote.endswith(".lz") else remote
+                    done(UploadOutcome.OK, f"uploaded to {remote}", remote_path=remote or None)
                 elif result is None:
                     done(UploadOutcome.FAILED, "upload cancelled in the Controller")
                 else:

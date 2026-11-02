@@ -256,3 +256,51 @@ def test_discard_pending_input_drops_a_stale_status_reply():
     assert dropped == len(b"<Idle|MPos:0,0,0>\n") + len(b"ok\r\n")
     assert stream.chunks == []
     assert Controller.discardPendingInput(SimpleNamespace(stream=None)) == 0
+
+
+def test_top_bar_summary():
+    from carveracontroller.addons.upload_api.api import summarize
+
+    base = {
+        "running": True,
+        "address": ("127.0.0.1", 8642),
+        "receiving": [],
+        "uploading": None,
+        "queued": 0,
+        "waiting": "",
+        "last": None,
+    }
+    assert summarize({"running": False}, 0)["visible"] is False
+    idle = summarize(base, 100)
+    assert (idle["visible"], idle["main"], idle["minor"], idle["active"]) == (True, "Upload API", "port 8642", False)
+    assert "this computer" in idle["tooltip"]
+    assert summarize({**base, "receiving": ["a.nc"]}, 100)["main"] == "Receiving"
+    assert summarize({**base, "receiving": ["a.nc"]}, 100)["active"] is True
+    sending = summarize({**base, "uploading": "a.nc"}, 100)
+    assert (sending["main"], sending["minor"], sending["active"]) == ("Sending", "a.nc", True)
+    waiting = summarize({**base, "queued": 2, "waiting": "machine is Run"}, 100)
+    assert (waiting["main"], waiting["minor"]) == ("2 queued", "machine is Run")
+    done = {**base, "last": {"name": "a.nc", "state": "done", "finished_at": 95, "message": ""}}
+    assert summarize(done, 100)["main"] == "Sent"
+    assert summarize(done, 200)["main"] == "Upload API"  # fades back
+    failed = {**base, "last": {"name": "a.nc", "state": "failed", "finished_at": 95, "message": "x"}}
+    assert summarize(failed, 110)["main"] == "Failed"
+
+
+def test_changes_are_reported_and_done_jobs_know_their_machine_path():
+    changes = []
+    bridge = FakeBridge()
+    server = UploadApi(bridge, on_change=lambda: changes.append(server.snapshot()))
+    server.start("127.0.0.1", 0)
+    server.queue.poll_interval = 0.02
+    try:
+        assert changes and changes[-1]["running"] is True
+        _, job, _ = post_file(server, "seen.nc", b"G21\n")
+        assert wait_for(lambda: request(server, "GET", f"/v1/uploads/{job['id']}")[1]["state"] == "done")
+        assert any(c.get("receiving") == ["seen.nc"] for c in changes)  # while the body arrived
+        assert any(c.get("uploading") == "seen.nc" for c in changes)
+        assert server.snapshot()["last"]["state"] == "done"
+        assert request(server, "GET", f"/v1/uploads/{job['id']}")[1]["remote_path"] == f"{REMOTE_DIR}/seen.nc"
+    finally:
+        server.stop()
+    assert changes[-1] == {"running": False}

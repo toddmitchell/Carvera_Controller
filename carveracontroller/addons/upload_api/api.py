@@ -96,8 +96,9 @@ class MachineBridge(Protocol):
     def machine_name(self) -> str:
         """The connected machine's name or address, for status (may be empty)."""
 
-    def upload(self, local_path: str, remote_dir: str, done: Callable[[str, str], None]) -> None:
-        """Start uploading ``local_path`` into ``remote_dir``; call ``done(outcome, message)`` once."""
+    def upload(self, local_path: str, remote_dir: str, done: Callable[..., None]) -> None:
+        """Start uploading ``local_path`` into ``remote_dir``; call ``done(outcome, message,
+        remote_path=None)`` once (``remote_path``: where the file is on the machine, when known)."""
 
     def notify(self, message: str) -> None:
         """Tell the operator something happened (e.g. a line in the Controller's log)."""
@@ -112,6 +113,8 @@ class Job:
     local_path: str
     client: str
     state: str = "queued"  # queued, uploading, done, failed, cancelled
+    #: Where the file ended up on the machine (set when done).
+    remote_path: str | None = None
     message: str = ""
     created_at: float = field(default_factory=time.time)
     finished_at: float | None = None
@@ -125,6 +128,7 @@ class Job:
             "md5": self.md5,
             "state": self.state,
             "message": self.message,
+            "remote_path": self.remote_path,
             "created_at": self.created_at,
             "finished_at": self.finished_at,
         }
@@ -139,8 +143,11 @@ class UploadQueue:
         spool_dir: str | None = None,
         poll_interval: float = 1.0,
         upload_timeout: float = UPLOAD_TIMEOUT_S,
+        on_change: Callable[[], None] | None = None,
     ):
         self.bridge = bridge
+        #: Called (from any thread) whenever a job or the waiting reason changes; for the UI.
+        self.on_change = on_change
         self.spool_dir = spool_dir or tempfile.mkdtemp(prefix="carvera-upload-api-")
         self.poll_interval = poll_interval
         self.upload_timeout = upload_timeout
@@ -162,6 +169,7 @@ class UploadQueue:
             self._order.append(job.id)
             self._prune()
         self._wake.set()
+        self._changed()
         return job
 
     def get(self, job_id: str) -> Job | None:
@@ -186,7 +194,29 @@ class UploadQueue:
                 return False, f"can't cancel an upload that is {job.state}"
             job.state, job.message, job.finished_at = "cancelled", "cancelled by client", time.time()
         self._discard(job)
+        self._changed()
         return True, ""
+
+    def _changed(self) -> None:
+        if self.on_change:
+            try:
+                self.on_change()
+            except Exception:
+                logger.exception("Upload API change listener failed")
+
+    def _set_waiting(self, reason: str) -> None:
+        if reason != self.waiting_reason:
+            self.waiting_reason = reason
+            self._changed()
+
+    def uploading_job(self) -> Job | None:
+        with self._lock:
+            return next((j for j in self._jobs.values() if j.state == "uploading"), None)
+
+    def last_finished(self) -> Job | None:
+        with self._lock:
+            done = [j for j in self._jobs.values() if j.finished_at is not None]
+        return max(done, key=lambda j: j.finished_at or 0) if done else None
 
     def _prune(self) -> None:
         finished = [i for i in self._order if self._jobs[i].state in ("done", "failed", "cancelled")]
@@ -239,23 +269,26 @@ class UploadQueue:
         """Upload the oldest queued job if the machine is ready. Blocks until that upload ends."""
         job = self._next_queued()
         if job is None:
-            self.waiting_reason = ""
+            self._set_waiting("")
             return
         ready, reason = self.bridge.readiness()
         if not ready:
-            self.waiting_reason = reason
+            self._set_waiting(reason)
             return
-        self.waiting_reason = ""
+        self._set_waiting("")
         with self._lock:
             if job.state != "queued":  # cancelled meanwhile
                 return
             job.state, job.message = "uploading", ""
+        self._changed()
 
         finished = threading.Event()
         result: dict[str, str] = {}
 
-        def done(outcome: str, message: str = "") -> None:
+        def done(outcome: str, message: str = "", remote_path: str | None = None) -> None:
             result["outcome"], result["message"] = outcome, message
+            if remote_path:
+                result["remote_path"] = remote_path
             finished.set()
 
         try:
@@ -267,12 +300,18 @@ class UploadQueue:
 
         outcome, message = result.get("outcome", UploadOutcome.FAILED), result.get("message", "")
         with self._lock:
-            if outcome == UploadOutcome.BUSY:
+            requeued = outcome == UploadOutcome.BUSY
+            if requeued:
                 job.state, job.message = "queued", message or "machine became busy"
-                return
-            job.state = "done" if outcome == UploadOutcome.OK else "failed"
-            job.message = message
-            job.finished_at = time.time()
+            else:
+                job.state = "done" if outcome == UploadOutcome.OK else "failed"
+                job.message = message
+                job.finished_at = time.time()
+                if job.state == "done":
+                    job.remote_path = result.get("remote_path") or f"{REMOTE_DIR}/{job.name}"
+        self._changed()
+        if requeued:
+            return
         self._discard(job)
         if job.state == "done":
             self.bridge.notify(f"Upload API: uploaded {job.name} to {REMOTE_DIR} (from {job.client})")
@@ -290,9 +329,28 @@ class UploadApiServer(ThreadingHTTPServer):
 
     def __init__(self, address: tuple[str, int], queue: UploadQueue, token: str = "", allowed_origins=()):
         self.queue = queue
+        #: Files whose bodies are arriving right now (request id -> name), for the UI.
+        self.receiving: dict[int, str] = {}
+        self._receiving_lock = threading.Lock()
         self.token = token
         self.allowed_origins = {o.strip().rstrip("/") for o in allowed_origins if o.strip()}
         super().__init__(address, _Handler)
+
+    def begin_receiving(self, name: str) -> int:
+        key = id(threading.current_thread())
+        with self._receiving_lock:
+            self.receiving[key] = name
+        self.queue._changed()
+        return key
+
+    def end_receiving(self, key: int) -> None:
+        with self._receiving_lock:
+            self.receiving.pop(key, None)
+        self.queue._changed()
+
+    def receiving_names(self) -> list[str]:
+        with self._receiving_lock:
+            return list(self.receiving.values())
 
     def server_bind(self):
         # HTTPServer.server_bind looks up the host's fully qualified name, a reverse-DNS query that
@@ -462,6 +520,7 @@ class _Handler(BaseHTTPRequestHandler):
         local_path = os.path.join(q.spool_dir, spool_name)
         digest = hashlib.md5()  # noqa: S324 - an integrity check, as the machine uses MD5
         remaining = length
+        receiving = self.server.begin_receiving(name)
         try:
             with open(local_path, "wb") as fh:
                 while remaining > 0:
@@ -475,6 +534,8 @@ class _Handler(BaseHTTPRequestHandler):
             _remove(local_path)
             self._error(HTTPStatus.BAD_REQUEST, str(exc))
             return
+        finally:
+            self.server.end_receiving(receiving)
         if digest.hexdigest() != md5:
             _remove(local_path)
             self._error(HTTPStatus.UNPROCESSABLE_ENTITY, f"MD5 mismatch: received {digest.hexdigest()}, expected {md5}")
@@ -506,8 +567,10 @@ def is_loopback(host: str) -> bool:
 class UploadApi:
     """Owns the queue and the HTTP server; started and stopped from the Controller's settings."""
 
-    def __init__(self, bridge: MachineBridge):
+    def __init__(self, bridge: MachineBridge, on_change: Callable[[], None] | None = None):
         self.bridge = bridge
+        #: Called from any thread when anything shown in the UI changes.
+        self.on_change = on_change
         self.queue: UploadQueue | None = None
         self.server: UploadApiServer | None = None
         self._server_thread: threading.Thread | None = None
@@ -522,13 +585,15 @@ class UploadApi:
         self.stop()
         if not is_loopback(host) and not token:
             raise ValueError("a token is required when the Upload API listens beyond this computer")
-        self.queue = UploadQueue(self.bridge)
+        self.queue = UploadQueue(self.bridge, on_change=self.on_change)
         self.queue.start()
         self.server = UploadApiServer((host, port), self.queue, token=token, allowed_origins=allowed_origins)
         self.address = self.server.server_address[:2]
         self._server_thread = threading.Thread(target=self.server.serve_forever, name="upload-api-http", daemon=True)
         self._server_thread.start()
         logger.info("Upload API listening on %s:%s", *self.address)
+        if self.on_change:
+            self.on_change()
 
     def stop(self) -> None:
         if self.server:
@@ -538,4 +603,54 @@ class UploadApi:
         if self.queue:
             self.queue.stop()
             self.queue = None
-        self.address = None
+        was_running, self.address = self.address is not None, None
+        if was_running and self.on_change:
+            self.on_change()
+
+    def snapshot(self) -> dict:
+        """What the UI shows: whether it runs, what is arriving, uploading, queued, last result."""
+        if not self.server or not self.queue or not self.address:
+            return {"running": False}
+        uploading = self.queue.uploading_job()
+        last = self.queue.last_finished()
+        return {
+            "running": True,
+            "address": self.address,
+            "receiving": self.server.receiving_names(),
+            "uploading": uploading.name if uploading else None,
+            "queued": self.queue.counts()["queued"],
+            "waiting": self.queue.waiting_reason,
+            "last": None
+            if last is None
+            else {"name": last.name, "state": last.state, "finished_at": last.finished_at, "message": last.message},
+        }
+
+
+#: How long the top bar shows "Sent" / "Failed" after an upload ends.
+SHOW_DONE_S = 10
+SHOW_FAILED_S = 30
+
+
+def summarize(snapshot: dict, now: float) -> dict:
+    """Top-bar text for a snapshot: main and minor lines, whether to highlight, and a tooltip."""
+    if not snapshot.get("running"):
+        return {"visible": False, "main": "", "minor": "", "active": False, "tooltip": ""}
+    host, port = snapshot["address"]
+    where = "this computer" if is_loopback(str(host)) else "the network"
+    tooltip = f"Upload API on {host}:{port} (open to {where}). Uploads only; never runs jobs."
+    last = snapshot.get("last")
+    out = {"visible": True, "active": False, "tooltip": tooltip}
+    if snapshot.get("receiving"):
+        names = snapshot["receiving"]
+        out.update(main="Receiving", minor=names[0] if len(names) == 1 else f"{len(names)} files", active=True)
+    elif snapshot.get("uploading"):
+        out.update(main="Sending", minor=snapshot["uploading"], active=True)
+    elif snapshot.get("queued"):
+        out.update(main=f"{snapshot['queued']} queued", minor=snapshot.get("waiting") or "starting…")
+    elif last and last["state"] == "done" and now - (last["finished_at"] or 0) < SHOW_DONE_S:
+        out.update(main="Sent", minor=last["name"])
+    elif last and last["state"] == "failed" and now - (last["finished_at"] or 0) < SHOW_FAILED_S:
+        out.update(main="Failed", minor=last["name"])
+    else:
+        out.update(main="Upload API", minor=f"port {port}")
+    return out
