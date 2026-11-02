@@ -18,7 +18,7 @@ from carveracontroller.ui.theme import get_theme
 
 STATE_TEXT = {
     "queued": tr._("waiting"),
-    "uploading": tr._("sending"),
+    "uploading": tr._("uploading"),
     "done": tr._("on the machine"),
     "failed": tr._("failed"),
     "cancelled": tr._("cancelled"),

@@ -6794,14 +6794,15 @@ class Makera(RelativeLayout):
         if path:
             self._remove_path_quietly(path)
 
-    def uploadLocalFile(self, filepath, callback=None, firmware=None, remote_dir=None, on_finished=None):
+    def uploadLocalFile(self, filepath, callback=None, firmware=None, remote_dir=None, on_finished=None, quiet=False):
         if firmware is None:
             firmware = bool(self.file_popup.firmware_mode)
         self._uploading_firmware = bool(firmware)
         self.controller.sendNUM = SEND_FILE
         self.uploading_file = filepath
         self.original_upload_filepath = filepath  # Store original path for recent directory tracking
-        if "lz" in self.filetype and not self._uploading_firmware:  # Compress file if supported
+        # quiet (Upload API): no progress popup, and no compression (its decompress step has a popup).
+        if "lz" in self.filetype and not self._uploading_firmware and not quiet:  # Compress file if supported
             qlzfilename = self.compress_file(filepath)
             if qlzfilename:
                 self.uploading_file = qlzfilename
@@ -6809,7 +6810,7 @@ class Makera(RelativeLayout):
         def run():  # on_finished(result) always runs: True, False, or None when cancelled
             result = False
             try:
-                result = self.doUpload(callback, remote_dir)
+                result = self.doUpload(callback, remote_dir, quiet)
             finally:
                 if on_finished:
                     on_finished(result)
@@ -6817,7 +6818,7 @@ class Makera(RelativeLayout):
         threading.Thread(target=run).start()
 
     # -----------------------------------------------------------------------
-    def doUpload(self, callback, remote_dir=None):
+    def doUpload(self, callback, remote_dir=None, quiet=False):
         firmware = bool(self._uploading_firmware)
         upload_result = None
         local_path = self.uploading_file
@@ -6845,7 +6846,7 @@ class Makera(RelativeLayout):
         if displayname.endswith(".lz"):
             # 删除 ".lz" 后缀
             displayname = displayname[:-3]
-        if getattr(self, "_batch_kind", None) != "upload":
+        if getattr(self, "_batch_kind", None) != "upload" and not quiet:
             Clock.schedule_once(
                 partial(self.progressStart, tr._("Uploading") + "\n%s" % displayname, self.cancelProcessingFile), 0
             )
@@ -6870,7 +6871,7 @@ class Makera(RelativeLayout):
         self.controller.resumeStream()
         self.uploading = False
 
-        if getattr(self, "_batch_kind", None) != "upload":
+        if getattr(self, "_batch_kind", None) != "upload" and not quiet:
             self._schedule_progress_finish()
 
         self.heartbeat_time = time.time()

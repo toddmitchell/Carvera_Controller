@@ -73,6 +73,7 @@ class MakeraBridge:
                     firmware=False,
                     remote_dir=remote_dir,
                     on_finished=finished,
+                    quiet=True,  # progress shows in the top bar, not a popup
                 )
             except Exception as exc:
                 logger.exception("Upload API upload failed to start")

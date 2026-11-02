@@ -268,12 +268,12 @@ def test_top_bar_summary():
     assert summarize({**base, "receiving": ["a.nc"]}, 100)["main"] == "Receiving"
     assert summarize({**base, "receiving": ["a.nc"]}, 100)["active"] is True
     sending = summarize({**base, "uploading": "a.nc"}, 100)
-    assert (sending["main"], sending["minor"], sending["active"]) == ("Sending", "a.nc", True)
+    assert (sending["main"], sending["minor"], sending["active"]) == ("Uploading", "a.nc", True)
     waiting = summarize({**base, "queued": 2, "waiting": "machine is Run"}, 100)
-    assert (waiting["main"], waiting["minor"]) == ("2 queued", "machine is Run")
+    assert (waiting["main"], waiting["minor"]) == ("2 waiting", "machine is Run")
     done = {**base, "last": {"name": "a.nc", "state": "done", "finished_at": 95, "message": ""}}
-    assert summarize(done, 100)["main"] == "Sent"
-    assert summarize(done, 100)["refresh_in"] == 5  # when "Sent" fades back
+    assert summarize(done, 100)["main"] == "Uploaded"
+    assert summarize(done, 100)["refresh_in"] == 5  # when "Uploaded" fades back
     assert idle["refresh_in"] is None
     assert summarize(done, 200)["main"] == "Upload API"  # fades back
     failed = {**base, "last": {"name": "a.nc", "state": "failed", "finished_at": 95, "message": "x"}}

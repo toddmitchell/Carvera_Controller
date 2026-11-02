@@ -623,7 +623,7 @@ class UploadApi:
         }
 
 
-#: How long the top bar shows "Sent" / "Failed" after an upload ends.
+#: How long the top bar shows "Uploaded" / "Failed" after an upload ends.
 SHOW_DONE_S = 10
 SHOW_FAILED_S = 30
 
@@ -636,18 +636,18 @@ def summarize(snapshot: dict, now: float) -> dict:
     where = "this computer" if is_loopback(str(host)) else "the network"
     tooltip = f"Upload API on {host}:{port} (open to {where}). Uploads only; never runs jobs."
     last = snapshot.get("last")
-    #: Seconds until this text changes with no new event (a "Sent"/"Failed" fading back), or None.
+    #: Seconds until this text changes with no new event (an "Uploaded"/"Failed" fading back), or None.
     out = {"visible": True, "active": False, "tooltip": tooltip, "refresh_in": None}
     since = now - ((last or {}).get("finished_at") or 0)
     if snapshot.get("receiving"):
         names = snapshot["receiving"]
         out.update(main="Receiving", minor=names[0] if len(names) == 1 else f"{len(names)} files", active=True)
     elif snapshot.get("uploading"):
-        out.update(main="Sending", minor=snapshot["uploading"], active=True)
+        out.update(main="Uploading", minor=snapshot["uploading"], active=True)
     elif snapshot.get("queued"):
-        out.update(main=f"{snapshot['queued']} queued", minor=snapshot.get("waiting") or "starting…")
+        out.update(main=f"{snapshot['queued']} waiting", minor=snapshot.get("waiting") or "starting…")
     elif last and last["state"] == "done" and since < SHOW_DONE_S:
-        out.update(main="Sent", minor=last["name"], refresh_in=SHOW_DONE_S - since)
+        out.update(main="Uploaded", minor=last["name"], refresh_in=SHOW_DONE_S - since)
     elif last and last["state"] == "failed" and since < SHOW_FAILED_S:
         out.update(main="Failed", minor=last["name"], refresh_in=SHOW_FAILED_S - since)
     else:

@@ -85,7 +85,7 @@ class UploadApiAddon:
     def refresh(self, *_args) -> None:
         """Show, update or remove the top-bar item from the API's current state."""
         state = summarize(self.api.snapshot(), time.time())
-        if state["refresh_in"]:  # "Sent"/"Failed" fades back
+        if state["refresh_in"]:  # "Uploaded"/"Failed" fades back
             Clock.schedule_once(self.refresh, state["refresh_in"])
         if not state["visible"]:
             if self.view is not None and self.view.parent is not None:
@@ -107,6 +107,10 @@ class UploadApiAddon:
         if self.view is None:
             self.view = Factory.TopDataView()
             self.view.data_icon = "data/upload.png"
+            # The shared style's main line is sized for short numbers ("1000"); words need a smaller font.
+            for label in self.view.walk(restrict=True):
+                if type(label).__name__ == "ScrollingLabel":  # its sizes are strings, e.g. "18sp"
+                    label.font_size = label.effective_font_size = "13sp"
             self.view.bind(on_release=lambda *_: self.show_details())
         if self.view.parent is None:
             bar = tool_view.parent
