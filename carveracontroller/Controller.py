@@ -2127,17 +2127,6 @@ class Controller:
                     serial_port.read(serial_port.in_waiting)
             except Exception:
                 pass
-        elif self.stream is not None and hasattr(self.stream, "waiting_for_recv"):
-            # Streams without an input buffer to reset (WiFi): read off what has arrived.
-            dropped = 0
-            try:
-                while dropped < 65536 and self.stream.waiting_for_recv():
-                    data = self.stream.recv()
-                    if not data:
-                        break
-                    dropped += len(data)
-            except Exception:
-                pass
         self.comms.reset_parser()
 
     @staticmethod

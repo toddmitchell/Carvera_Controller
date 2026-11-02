@@ -59,4 +59,10 @@ That is checked twice: once by the queue, then again on the Kivy main thread jus
 ## Code
 
 - `api.py`: the queue and the HTTP server. Kivy-free and unit tested (`tests/unit/test_upload_api.py`).
-- `bridge.py`: the Controller side. Readiness from `CNC.vars` and `Makera.transfer_block_reason()`, uploads via `Makera.uploadLocalFile(..., remote_dir=, on_finished=)`, and notices in the log.
+- `bridge.py`: the Controller side. Readiness from `CNC.vars` and the app state, uploads via `Makera.uploadLocalFile(..., remote_dir=, on_finished=)`, and notices in the log.
+- `addon.py`: the settings panel, starting and stopping the API, the top-bar item and the uploads popup.
+- `popup.py`: the uploads list.
+
+The Controller's own code only has a few hooks for this (see the top of `addon.py`): creating the
+addon, passing on settings changes, stopping it on quit, and two optional `uploadLocalFile`
+parameters.

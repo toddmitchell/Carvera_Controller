@@ -2739,20 +2739,6 @@
                     root.tool_drop_down.open(self)
                     root.tool_drop_down.opened = True
 
-            # Upload API: shown only while it runs; highlighted while a file arrives or uploads.
-            TopDataView:
-                id: upload_api_data_view
-                data_icon: 'data/upload.png'
-                tooltip_txt: app.upload_api_tooltip
-                main_text: app.upload_api_main
-                minr_text: app.upload_api_minor
-                active: app.upload_api_active
-                opacity: 1 if app.upload_api_visible else 0
-                disabled: not app.upload_api_visible
-                size_hint_min: ('90dp', None) if app.upload_api_visible else (0, None)
-                size_hint_max_x: dp(130) if app.upload_api_visible else 0
-                on_release: root.show_upload_api_details()
-
             
 
             Label:

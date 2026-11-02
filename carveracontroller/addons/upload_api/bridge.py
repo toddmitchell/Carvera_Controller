@@ -4,8 +4,10 @@ same ``uploadLocalFile`` path the file browser uses, and notices in the Controll
 from __future__ import annotations
 
 import logging
+import os
 from typing import Callable
 
+from kivy.app import App
 from kivy.clock import Clock
 
 from carveracontroller.CNC import CNC
@@ -28,9 +30,15 @@ class MakeraBridge:
         controller = getattr(m, "controller", None)
         if controller is None or state == NOT_CONNECTED or not getattr(controller, "stream", None):
             return False, "not connected to a machine"
-        blocked = m.transfer_block_reason()
-        if blocked:
-            return False, blocked
+        app = App.get_running_app()
+        if app is not None and app.playing:
+            return False, "a job is running"
+        if m.uploading or m.downloading or controller.sendNUM or controller.loadNUM:
+            return False, "another file transfer is in progress"
+        if m.decompstatus:
+            return False, "the machine is decompressing a file"
+        if getattr(m, "_batch_kind", None):
+            return False, "a batch transfer is in progress"
         if state != "Idle":
             return False, f"machine is {state}"
         return True, ""
@@ -47,7 +55,11 @@ class MakeraBridge:
                 done(UploadOutcome.BUSY, reason)
                 return
 
-            def finished(result, remote_path):
+            # API names never contain ".lz", and a compressed upload is decompressed on the
+            # machine under this same name.
+            remote_path = f"{remote_dir}/{os.path.basename(local_path)}"
+
+            def finished(result):
                 if result:
                     done(UploadOutcome.OK, f"uploaded to {remote_path}", remote_path=remote_path)
                 elif result is None:

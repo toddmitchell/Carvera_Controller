@@ -249,27 +249,6 @@ def test_queue_runs_jobs_in_order(tmp_path):
     assert list(tmp_path.iterdir()) == []  # spooled files and their job directories removed
 
 
-def test_flush_rx_drops_a_stale_status_reply_over_wifi():
-    from types import SimpleNamespace
-
-    from carveracontroller.Controller import Controller
-
-    class FakeWifiStream:  # no input buffer to reset, like WIFIStream
-        def __init__(self, chunks):
-            self.chunks = list(chunks)
-
-        def waiting_for_recv(self):
-            return bool(self.chunks)
-
-        def recv(self):
-            return self.chunks.pop(0)
-
-    stream = FakeWifiStream([b"<Idle|MPos:0,0,0>\n", b"ok\r\n"])
-    resets = []
-    Controller._flush_rx(SimpleNamespace(stream=stream, comms=SimpleNamespace(reset_parser=lambda: resets.append(1))))
-    assert stream.chunks == [] and resets == [1]
-
-
 def test_top_bar_summary():
     from carveracontroller.addons.upload_api.api import summarize
 
