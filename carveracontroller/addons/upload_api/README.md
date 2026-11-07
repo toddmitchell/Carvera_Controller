@@ -7,6 +7,8 @@ file to `/sd/gcodes` as soon as the machine is Idle, through the same upload pat
 
 **The API only uploads.** It never runs, jogs, homes or sends commands to the machine.
 
+For Fusion, there's an add-in that posts and sends with one button: [`integrations/fusion360/SendToCarvera`](../../../integrations/fusion360/SendToCarvera/README.md).
+
 ## Turning it on
 
 Settings → **Upload API**:
