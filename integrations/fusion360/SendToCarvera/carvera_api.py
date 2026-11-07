@@ -30,7 +30,8 @@ _opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 
 
 def load_settings(path: str = SETTINGS_PATH) -> dict:
-    """Port and token. They live outside the add-in folder, so a token can't end up in the repo."""
+    """Port, token, last post, and the last send for each document. They live outside the add-in
+    folder, so a token can't end up in the repo."""
     try:
         with open(path, encoding="utf-8") as fh:
             raw = json.load(fh)
@@ -39,16 +40,32 @@ def load_settings(path: str = SETTINGS_PATH) -> dict:
     raw = raw if isinstance(raw, dict) else {}
     port = raw.get("port")
     token = raw.get("token")
+    post = raw.get("post")
+    documents = raw.get("documents")
     return {
         "port": port if isinstance(port, int) and 0 < port < 65536 else DEFAULT_PORT,
         "token": token if isinstance(token, str) else "",
+        "post": post if isinstance(post, str) else "",
+        "documents": documents if isinstance(documents, dict) else {},
+    }
+
+
+def remembered(settings: dict, document: str) -> dict:
+    """The last send for a document: file name, NC Program (or None) and ticked ids."""
+    entry = settings["documents"].get(document)
+    entry = entry if isinstance(entry, dict) else {}
+    name, source, operations = entry.get("name"), entry.get("source"), entry.get("operations")
+    return {
+        "name": name if isinstance(name, str) else "",
+        "source": source if isinstance(source, int) else None,
+        "operations": [i for i in operations if isinstance(i, int)] if isinstance(operations, list) else [],
     }
 
 
 def save_settings(settings: dict, path: str = SETTINGS_PATH) -> None:
     fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     with os.fdopen(fd, "w", encoding="utf-8") as fh:
-        json.dump({"port": settings["port"], "token": settings["token"]}, fh)
+        json.dump(settings, fh)
 
 
 def safe_name(filename: str) -> str:
@@ -59,7 +76,15 @@ def safe_name(filename: str) -> str:
         raise ApiError(f"The post wrote “{filename}”, but the Carvera takes {', '.join(GCODE_EXTENSIONS)} files.")
     # ".lz" is refused because the firmware treats those names as compressed.
     stem = re.sub(r"[^A-Za-z0-9_-]+", "_", stem.replace(".lz", "_lz")).strip("_") or "fusion"
-    return stem[: MAX_NAME - len(ext)] + ext.lower()
+    return stem[: MAX_NAME - len(ext)].rstrip("_-") + ext.lower()
+
+
+def machine_name(typed: str, extension: str) -> str:
+    """The machine's file name for a typed name and the post's extension. Typing an extension is fine."""
+    stem = typed.strip()
+    if stem.lower().endswith(GCODE_EXTENSIONS):
+        stem = os.path.splitext(stem)[0]
+    return safe_name(f"{stem or 'fusion'}.{extension.lstrip('.')}")
 
 
 def _request(settings: dict, method: str, path: str, body: bytes | None = None, headers: dict | None = None) -> dict:
