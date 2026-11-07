@@ -15,6 +15,13 @@ uploads it to `/sd/gcodes` over the connection it already has, as soon as the ma
 
 The button appears on the toolbar at Manufacture → Milling, in its own **CARVERA** panel.
 
+On Windows, [`integrations/windows/install.ps1`](../../windows/install.ps1) does all of this, along with
+installing the Controller from this branch and adding it to the Start menu:
+
+```powershell
+irm https://raw.githubusercontent.com/toddmitchell/Carvera_Controller/upload-api/integrations/windows/install.ps1 | iex
+```
+
 ## Use
 
 Click **Send to Carvera** on the toolbar, or right-click in the Manufacture workspace and choose it.
