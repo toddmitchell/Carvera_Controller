@@ -9,6 +9,19 @@ file to `/sd/gcodes` as soon as the machine is Idle, through the same upload pat
 
 For Fusion, there's an add-in that posts and sends with one button: [`integrations/fusion360/SendToCarvera`](../../../integrations/fusion360/SendToCarvera/README.md).
 
+## Installing on Windows
+
+[`integrations/windows/install.ps1`](../../../integrations/windows/install.ps1) installs this Controller
+from the `upload-api` branch, along with Git, Python 3.12, Poetry and the C++ build tools if they're
+missing. It adds **Carvera Controller (Upload API)** to the Start menu and installs the Fusion add-in.
+Run this in PowerShell, and run it again to update:
+
+```powershell
+irm https://raw.githubusercontent.com/toddmitchell/Carvera_Controller/upload-api/integrations/windows/install.ps1 | iex
+```
+
+Then turn on the API (below) and restart Fusion.
+
 ## Turning it on
 
 Settings → **Upload API**:
